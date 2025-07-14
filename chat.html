@@ -2280,7 +2280,6 @@
             </div>
 
             <!-- 添加新歌曲 -->
-            <!-- [MODIFIED] HTML for adding songs now uses file inputs -->
             <h3>添加新歌曲</h3>
             <div id="addSongForm">
                 <div class="form-group">
@@ -2298,7 +2297,6 @@
                 </div>
                 <button class="form-submit" onclick="saveSong()">保存歌曲</button>
             </div>
-            <!-- [END MODIFIED] -->
 
             <!-- 歌词显示设置 -->
             <div style="margin-top: 20px;">
@@ -2322,7 +2320,7 @@
     <div class="top-notification" id="topNotification"></div>
 
     <script>
-        // --- 新增：通用文件上传函数 ---
+        // --- [MODIFIED] 通用文件上传函数 (上传到服务器以获取永久链接) ---
         async function handleFileUpload(inputId, targetUrlInputId, statusElementId) {
             const fileInput = document.getElementById(inputId);
             const file = fileInput.files[0];
@@ -2336,33 +2334,44 @@
 
             if (!file.type.startsWith('image/')) {
                 showToast('请上传图片文件');
-                fileInput.value = '';
+                fileInput.value = ''; // 清空选择
                 return;
             }
 
+            if (statusElement) statusElement.textContent = '上传中...';
+            
+            // 创建 FormData 来包装文件数据
             const formData = new FormData();
-            formData.append('image', file);
-
-            if(statusElement) statusElement.textContent = '上传中...';
+            // 这里的 'image' 键必须与 server.js 中 multer 设置的 fieldname 'image' 一致
+            formData.append('image', file); 
 
             try {
-                // This is a placeholder for a server-side upload endpoint.
-                // In a real application, you would replace '/upload' with your actual server endpoint.
-                // For this example, we'll simulate an upload and return a blob URL.
-                const objectURL = URL.createObjectURL(file);
-                targetUrlInput.value = objectURL;
-                if(statusElement) statusElement.textContent = '上传成功！';
-                showToast('图片“上传”成功（本地预览）');
-                
+                // 发送请求到后端的 /upload 接口
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: '上传请求失败' }));
+                    throw new Error(errorData.error || `服务器错误: ${response.status}`);
+                }
+
+                const result = await response.json();
+
+                // 服务器返回格式为 { url: '...' }
+                if (result.url) {
+                    targetUrlInput.value = result.url; // 将服务器返回的永久URL填入输入框
+                    if (statusElement) statusElement.textContent = '上传成功！';
+                    showToast('图片上传成功');
+                } else {
+                    throw new Error('服务器未返回有效的URL');
+                }
+
             } catch (error) {
-                console.error('Upload error:', error);
-                if(statusElement) statusElement.textContent = `上传失败: ${error.message}`;
+                console.error('文件上传失败:', error);
+                if (statusElement) statusElement.textContent = '上传失败';
                 showToast(`上传失败: ${error.message}`);
-            } finally {
-                // Do not clear fileInput.value here as it's handled by the browser
-                setTimeout(() => {
-                if(statusElement) statusElement.textContent = '';
-                }, 3000);
             }
         }
 
@@ -2384,14 +2393,14 @@
         };
         let moments = [];
         
-        // 音乐播放器全局变量
-        let audio = null;
-        let currentLyrics = [];
-        let currentLyricIndex = -1;
-        let playlist = [];
+        // --- 音乐播放器全局变量 ---
+        let audio = null; // Audio element
+        let db = null; // IndexedDB database connection
+        let playlist = []; // In-memory playlist of metadata
         let currentSongIndex = -1;
         let isPlaying = false;
         let lyricTimer = null;
+        let currentObjectUrl = null; // To keep track of the current blob URL for revocation
 
         // 默认记忆表格模板
         const defaultMemoryTable = `# 角色设定
@@ -2543,7 +2552,6 @@
                     max_tokens: 200
                 };
 
-                // MODIFIED: Use dynamic proxy
                 const response = await fetch(`/proxy/v1/chat/completions`, {
                     method: 'POST',
                     headers: {
@@ -2663,7 +2671,6 @@
                     temperature: 0.7,
                     max_tokens: 100
                 };
-                // MODIFIED: Use dynamic proxy
                 const response = await fetch(`/proxy/v1/chat/completions`, {
                     method: 'POST',
                     headers: {
@@ -2752,7 +2759,6 @@
                     temperature: 0.9,
                     max_tokens: 800
                 };
-                // MODIFIED: Use dynamic proxy
                 const response = await fetch(`/proxy/v1/chat/completions`, {
                     method: 'POST',
                     headers: {
@@ -2836,18 +2842,189 @@
                 });
             }
         }
+        
+        // --- IndexedDB Functions ---
+        function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open('MusicPlayerDB', 1);
 
-        function initMusicPlayer() {
-            loadPlaylistFromStorage();
+                request.onupgradeneeded = event => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains('songs')) {
+                        db.createObjectStore('songs', { keyPath: 'id', autoIncrement: true });
+                    }
+                };
+
+                request.onsuccess = event => {
+                    db = event.target.result;
+                    resolve(db);
+                };
+
+                request.onerror = event => {
+                    console.error('IndexedDB error:', event.target.errorCode);
+                    reject('IndexedDB error');
+                };
+            });
+        }
+
+        async function initMusicPlayer() {
+            try {
+                await openDB();
+                await loadPlaylistFromDB();
+            } catch (error) {
+                console.error("Failed to initialize music player:", error);
+                showToast("无法加载音乐库");
+            }
+
             document.getElementById('musicIcon').addEventListener('click', showMusicModal);
             document.getElementById('closeMusicModal').addEventListener('click', closeMusicModal);
             document.getElementById('progressBar').addEventListener('click', seekMusic);
             window.addEventListener('click', (event) => { if (event.target === document.getElementById('musicModal')) closeMusicModal(); });
+            
             audio = new Audio();
             audio.addEventListener('timeupdate', updateProgress);
             audio.addEventListener('ended', onSongEnded);
             audio.addEventListener('loadedmetadata', onMetadataLoaded);
         }
+
+        async function loadPlaylistFromDB() {
+            return new Promise((resolve, reject) => {
+                const transaction = db.transaction(['songs'], 'readonly');
+                const store = transaction.objectStore('songs');
+                const request = store.getAll();
+
+                request.onsuccess = () => {
+                    playlist = request.result.map(song => ({
+                        id: song.id,
+                        name: song.name,
+                        lyrics: song.lyrics,
+                    }));
+                    renderPlaylist();
+                    resolve();
+                };
+
+                request.onerror = (event) => {
+                    console.error('Failed to load playlist from DB:', event.target.error);
+                    reject('Failed to load playlist');
+                };
+            });
+        }
+        
+        async function saveSong() {
+            const nameInput = document.getElementById('songName');
+            const musicFileInput = document.getElementById('musicFileUpload');
+            const lrcFileInput = document.getElementById('lrcFile');
+
+            const musicFile = musicFileInput.files[0];
+            const lrcFile = lrcFileInput.files[0];
+
+            if (!musicFile) {
+                showToast('请选择一个音乐文件');
+                return;
+            }
+
+            const songName = nameInput.value.trim() || musicFile.name.replace(/\.[^/.]+$/, "");
+
+            let lyrics = [];
+            if (lrcFile) {
+                try {
+                    const lrcText = await lrcFile.text();
+                    lyrics = parseLRC(lrcText);
+                } catch (e) {
+                    showToast('歌词文件读取失败，将不带歌词保存。');
+                }
+            }
+            
+            const songRecord = {
+                name: songName,
+                music: musicFile, // Store the actual file blob
+                lyrics: lyrics
+            };
+
+            const transaction = db.transaction(['songs'], 'readwrite');
+            const store = transaction.objectStore('songs');
+            const request = store.add(songRecord);
+
+            request.onsuccess = async () => {
+                showToast(`歌曲 "${songName}" 已成功保存到本地`);
+                clearAddForm();
+                await loadPlaylistFromDB(); // Refresh the playlist from DB
+            };
+
+            request.onerror = (event) => {
+                console.error('Failed to save song to DB:', event.target.error);
+                showToast('保存歌曲失败');
+            };
+        }
+        
+        async function playSong(index) {
+            if (index < 0 || index >= playlist.length) return;
+            
+            const songInfo = playlist[index];
+            currentSongIndex = index;
+
+            // Revoke the previous object URL if it exists
+            if (currentObjectUrl) {
+                URL.revokeObjectURL(currentObjectUrl);
+                currentObjectUrl = null;
+            }
+
+            const transaction = db.transaction(['songs'], 'readonly');
+            const store = transaction.objectStore('songs');
+            const request = store.get(songInfo.id);
+
+            request.onsuccess = (event) => {
+                const songRecord = event.target.result;
+                if (songRecord && songRecord.music) {
+                    currentObjectUrl = URL.createObjectURL(songRecord.music);
+                    audio.src = currentObjectUrl;
+                    audio.play().then(() => {
+                        isPlaying = true;
+                        updatePlayButton();
+                        document.getElementById('currentSongInfo').style.display = 'block';
+                        document.getElementById('currentSongName').textContent = songRecord.name;
+                        currentLyrics = songRecord.lyrics || [];
+                        currentLyricIndex = -1;
+                        if (currentLyrics.length > 0) startLyricSync();
+                        else document.getElementById('currentLyric').textContent = '暂无歌词';
+                        renderPlaylist();
+                    }).catch(error => showToast('播放失败: ' + error.message));
+                } else {
+                    showToast('无法从数据库中找到歌曲文件');
+                }
+            };
+
+            request.onerror = (event) => {
+                console.error("Error fetching song from DB:", event.target.error);
+                showToast('播放歌曲时出错');
+            };
+        }
+        
+        async function deleteSong(index) {
+            if (confirm('确定要永久删除这首歌吗？')) {
+                const songInfo = playlist[index];
+                
+                const transaction = db.transaction(['songs'], 'readwrite');
+                const store = transaction.objectStore('songs');
+                const request = store.delete(songInfo.id);
+
+                request.onsuccess = async () => {
+                    showToast(`歌曲 "${songInfo.name}" 已删除`);
+                    if (index === currentSongIndex) {
+                        stopMusic();
+                        currentSongIndex = -1;
+                        document.getElementById('currentSongInfo').style.display = 'none';
+                    }
+                    await loadPlaylistFromDB(); // Refresh playlist from DB
+                };
+
+                request.onerror = (event) => {
+                    console.error('Failed to delete song from DB:', event.target.error);
+                    showToast('删除歌曲失败');
+                };
+            }
+        }
+        // --- [END] IndexedDB Functions ---
 
         function showMusicModal() {
             document.getElementById('musicModal').style.display = 'block';
@@ -2858,18 +3035,9 @@
             document.getElementById('musicModal').style.display = 'none';
         }
 
-        function loadPlaylistFromStorage() {
-            const saved = localStorage.getItem('musicPlaylist');
-            if (saved) { try { playlist = JSON.parse(saved); } catch (e) { playlist = []; } }
-        }
-
-        function savePlaylistToStorage() {
-            localStorage.setItem('musicPlaylist', JSON.stringify(playlist));
-        }
-
         function renderPlaylist() {
             const container = document.getElementById('playlistContainer');
-            if (playlist.length === 0) { container.innerHTML = '<p style="text-align: center; color: #999;">暂无歌曲</p>'; return; }
+            if (playlist.length === 0) { container.innerHTML = '<p style="text-align: center; color: #999;">暂无歌曲，请从下方上传</p>'; return; }
             container.innerHTML = '';
             playlist.forEach((song, index) => {
                 const songDiv = document.createElement('div');
@@ -2879,51 +3047,6 @@
                 container.appendChild(songDiv);
             });
         }
-
-        // [MODIFIED] Function to save songs from local files
-        function saveSong() {
-            const nameInput = document.getElementById('songName');
-            const musicFileInput = document.getElementById('musicFileUpload');
-            const lrcFileInput = document.getElementById('lrcFile');
-
-            const name = nameInput.value.trim();
-            const musicFile = musicFileInput.files[0];
-            const lrcFile = lrcFileInput.files[0];
-
-            if (!musicFile) {
-                showToast('请选择一个音乐文件');
-                return;
-            }
-            
-            const songName = name || musicFile.name.replace(/\.[^/.]+$/, "");
-
-            const musicObjectUrl = URL.createObjectURL(musicFile);
-
-            const processAndAddSong = (lyrics) => {
-                playlist.push({ name: songName, url: musicObjectUrl, lyrics: lyrics, isLocal: true });
-                savePlaylistToStorage();
-                renderPlaylist();
-                clearAddForm();
-                showToast(`歌曲 "${songName}" 已添加`);
-            };
-
-            if (lrcFile) {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    try {
-                        const lyrics = parseLRC(e.target.result);
-                        processAndAddSong(lyrics);
-                    } catch (error) {
-                        showToast('歌词文件处理失败，歌曲已添加但无歌词');
-                        processAndAddSong([]);
-                    }
-                };
-                reader.readAsText(lrcFile, 'UTF-8');
-            } else {
-                processAndAddSong([]);
-            }
-        }
-        // [END MODIFIED]
 
         function parseLRC(lrcContent) {
             const lines = lrcContent.split(/\r?\n/);
@@ -2946,24 +3069,6 @@
             });
             lyrics.sort((a, b) => a.time - b.time);
             return lyrics;
-        }
-
-        function playSong(index) {
-            if (index < 0 || index >= playlist.length) return;
-            currentSongIndex = index;
-            const song = playlist[index];
-            audio.src = song.url;
-            audio.play().then(() => {
-                isPlaying = true;
-                updatePlayButton();
-                document.getElementById('currentSongInfo').style.display = 'block';
-                document.getElementById('currentSongName').textContent = song.name;
-                currentLyrics = song.lyrics || [];
-                currentLyricIndex = -1;
-                if (currentLyrics.length > 0) startLyricSync();
-                else document.getElementById('currentLyric').textContent = '暂无歌词';
-                renderPlaylist();
-            }).catch(error => showToast('播放失败，请检查文件或URL'));
         }
 
         function startLyricSync() {
@@ -2991,7 +3096,9 @@
         }
 
         function sendLyricToAI(lyricText) {
-            window.currentMusicInfo = { songName: playlist[currentSongIndex]?.name || '', lyric: lyricText, isPlaying };
+            if (currentSongIndex > -1) {
+                 window.currentMusicInfo = { songName: playlist[currentSongIndex]?.name || '', lyric: lyricText, isPlaying };
+            }
         }
 
         function togglePlay() {
@@ -3011,6 +3118,10 @@
             updatePlayButton();
             document.getElementById('currentLyric').textContent = '等待歌词...';
             window.currentMusicInfo = null;
+            if (currentObjectUrl) {
+                URL.revokeObjectURL(currentObjectUrl);
+                currentObjectUrl = null;
+            }
         }
 
         function updatePlayButton() {
@@ -3041,43 +3152,16 @@
                 audio.currentTime = ((event.clientX - rect.left) / rect.width) * audio.duration;
             }
         }
-        
-        // [MODIFIED] Function to delete songs, now revokes object URLs for local files
-        function deleteSong(index) {
-            if (confirm('确定要删除这首歌吗？')) {
-                const songToDelete = playlist[index];
-                
-                if (songToDelete.isLocal && songToDelete.url.startsWith('blob:')) {
-                    URL.revokeObjectURL(songToDelete.url);
-                }
-
-                playlist.splice(index, 1);
-                savePlaylistToStorage();
-                
-                if (index === currentSongIndex) { 
-                    stopMusic(); 
-                    currentSongIndex = -1; 
-                    document.getElementById('currentSongInfo').style.display = 'none';
-                } else if (index < currentSongIndex) {
-                    currentSongIndex--;
-                }
-                
-                renderPlaylist();
-            }
-        }
-        // [END MODIFIED]
 
         function toggleLyricsDisplay() {
             document.getElementById('floatingLyrics').style.display = document.getElementById('showLyrics').checked ? 'block' : 'none';
         }
 
-        // [MODIFIED] Clear form function now clears file inputs
         function clearAddForm() {
             document.getElementById('songName').value = '';
             document.getElementById('musicFileUpload').value = '';
             document.getElementById('lrcFile').value = '';
         }
-        // [END MODIFIED]
 
         function formatMusicTime(seconds) {
             const mins = Math.floor(seconds / 60);
@@ -3557,9 +3641,16 @@
                 if (window.currentMusicInfo && window.currentMusicInfo.isPlaying) systemPrompt += `\n\n[系统提示：用户正在听歌，当前歌曲是《${window.currentMusicInfo.songName}》，正在播放的歌词是："${window.currentMusicInfo.lyric}"]`;
                 systemPrompt += `\n\n--- 红包功能 ---\n当用户给你发红包时，你会看到这样的提示: "[用户发送了一个金额为XX的红包，留言是：XXX]"。\n你必须根据你的人设对此作出回应。例如，如果你是财迷，就表现得非常兴奋；如果你很高冷，就简单道谢。你的回应要自然，符合对话情景。`;
                 
-                // --- MODIFIED: Updated instructions for AI to send emojis ---
-                const availableEmojisString = emojis.map(e => `[emoji:${e.url}] (含义: ${e.meaning})`).join('\n');
-                systemPrompt += `\n\n--- 至关重要的输出格式规则 ---\n你的回复必须严格遵守以下顺序和格式，由两部分组成：\n1.  **聊天内容**: 你的对话回复。为了模拟真实聊天，你必须将完整的回复拆分成多个（3到8条）独立的短消息（气泡）。每条消息应尽量简短（例如30字以内）。你必须使用“|||”作为每条短消息之间的唯一分隔符。你应该自然地包含至少一个表情包，直接使用我们提供的格式 [emoji:图片URL]，它本身会成为一条独立的消息。\n2.  **更新后的记忆表格**: 在所有聊天内容和分隔符之后，你必须提供完整、更新后的记忆表格。整个表格的Markdown内容必须被 <memory_table>...</memory_table> 标签包裹。这不是可选项，而是必须执行的指令。你必须根据本轮最新对话更新表格。如果没有任何信息需要新增或修改，则原样返回上一次的表格。未能按此格式返回表格将导致系统错误。\n\n可用表情列表和格式:\n${availableEmojisString || '无可用表情'}`;
+                const availableEmojisString = emojis.map(e => `- [emoji:${e.url}] (含义: ${e.meaning})`).join('\n');
+                systemPrompt += `\n\n--- 至关重要的输出格式规则 ---\n你的回复必须严格遵守以下顺序和格式，由两部分组成：\n1.  **聊天内容**: 你的对话回复。为了模拟真实聊天，你必须将完整的回复拆分成多个（3到8条）独立的短消息（气泡）。每条消息应尽量简短（例如30字以内）。你必须使用“|||”作为每条短消息之间的唯一分隔符。\n2.  **更新后的记忆表格**: 在所有聊天内容和分隔符之后，你必须提供完整、更新后的记忆表格。整个表格的Markdown内容必须被 <memory_table>...</memory_table> 标签包裹。这不是可选项，而是必须执行的指令。你必须根据本轮最新对话更新表格。如果没有任何信息需要新增或修改，则原样返回上一次的表格。未能按此格式返回表格将导致系统错误。`;
+                
+                systemPrompt += `\n\n--- 表情包使用规则 ---\n`
+                             + `你可以从下面的列表中选择表情包来丰富你的表达。\n`
+                             + `要发送表情包，你必须严格使用以下格式，并将其作为一条独立的消息（即前后都有 ||| 分隔符，或者在回复的开头/结尾）：\n`
+                             + `[emoji:图片URL]\n`
+                             + `例如: 你好呀|||[emoji:https://example.com/happy.gif]|||今天天气真不错\n`
+                             + `**重要提醒：** 你可能会在用户的消息历史中看到 "[发送了表情：...]" 这样的文字，这是系统为了让你理解对话而生成的提示，你绝对不能在你的回复中模仿或使用这种格式。你只能使用 [emoji:图片URL] 格式来发送表情。\n\n`
+                             + `可用表情列表:\n${availableEmojisString || '无可用表情'}`;
                 
                 const messages = [{ role: 'system', content: systemPrompt }];
                 const recentMessages = currentContact.messages.slice(-apiSettings.contextMessageCount);
@@ -3622,8 +3713,7 @@
                 const replies = chatRepliesText.split('|||').map(r => r.trim()).filter(r => r);
                 const processedReplies = [];
                 
-                // --- MODIFIED: Updated emoji parsing logic ---
-                const emojiUrlRegex = /^\[emoji:(https?:\/\/[^\]]+)\]$/;
+                const emojiUrlRegex = /^\[emoji:((?:https?|blob):[^\]]+)\]$/;
                 for (const reply of replies) {
                     const emojiMatch = reply.match(emojiUrlRegex);
                     if (emojiMatch) {
