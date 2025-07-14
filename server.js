@@ -6,7 +6,7 @@ const fs = require('fs');
 const { URL } = require('url'); // Node.js built-in module
 
 // --- 配置 ---
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // 创建 express 应用
 const app = express();
